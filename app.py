@@ -2,68 +2,46 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
-import requests
+import gdown
 
-# --- Параметры ---
+# --- Конфигурация ---
+st.set_page_config(page_title="Журнал ШЧ", layout="wide")
+st.title("📊 Журнал ситуаций ШЧ")
+
 DB_PATH = "зсжд.db"
-DB_URL = "https://drive.google.com/uc?export=download&id=1hJqrdYiL-pEqvMXYA_yLG2WNB_WofH0w&confirm=t"
+FILE_ID = "1hJqrdYiL-pEqvMXYA_yLG2WNB_WofH0w"
+DB_URL = f"https://drive.google.com/uc?id={FILE_ID}"
 
-# --- Скачивание базы данных ---
+# --- Скачивание базы данных с Google Диска (через gdown) ---
 if not os.path.exists(DB_PATH):
     with st.spinner("⏳ Загрузка базы данных (997 МБ)... Это может занять несколько минут."):
         try:
-            response = requests.get(DB_URL, stream=True, timeout=120)
-            response.raise_for_status()
-
-            # Проверяем, что скачался именно файл, а не HTML
-            content_type = response.headers.get('content-type', '')
-            if 'text/html' in content_type:
-                st.error("❌ Google Диск вернул HTML-страницу вместо файла. Возможно, нужно подтверждение. Попробуйте обновить страницу позже.")
-                st.stop()
-
-            total_size = int(response.headers.get('content-length', 0))
-            with open(DB_PATH, "wb") as f:
-                if total_size == 0:
-                    f.write(response.content)
-                else:
-                    downloaded = 0
-                    progress_bar = st.progress(0)
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            progress = min(downloaded / total_size, 1.0)
-                            progress_bar.progress(progress)
+            # gdown скачивает файл, обходя предупреждения Google
+            gdown.download(DB_URL, DB_PATH, quiet=False)
             st.success("✅ База данных загружена!")
         except Exception as e:
             st.error(f"❌ Ошибка загрузки базы данных: {e}")
             st.stop()
 
-# --- Проверка, что база данных корректна ---
-if not os.path.exists(DB_PATH):
-    st.error("❌ Файл базы данных не найден.")
-    st.stop()
-
-# --- Подключение к БД ---
-@st.cache_resource
-def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
-
+# --- Проверка, что файл является корректной SQLite-базой ---
 try:
-    conn = get_conn()
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='incidents'")
     if not cursor.fetchone():
         st.error("❌ Таблица 'incidents' не найдена в базе данных. Проверьте файл.")
         st.stop()
-except Exception as e:
-    st.error(f"❌ Ошибка подключения к базе данных: {e}")
+except sqlite3.DatabaseError as e:
+    st.error(f"❌ Файл повреждён или не является SQLite-базой: {e}")
     st.stop()
 
-# --- Остальной код (фильтры, пагинация, отображение) ---
-st.set_page_config(page_title="Журнал ШЧ", layout="wide")
-st.title("📊 Журнал ситуаций ШЧ")
+@st.cache_resource
+def get_conn():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
+conn = get_conn()
+
+# --- Фильтры и остальной код (без изменений) ---
 FILTER_COLUMNS = [
     "Дата",
     "Дистанция",
@@ -142,6 +120,7 @@ where_sql = " AND ".join(where_clauses)
 total_rows = get_total_count(where_sql, params)
 PAGE_SIZE = 200
 total_pages = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
+
 page = st.sidebar.number_input("Страница", min_value=1, max_value=total_pages, value=1, step=1)
 offset = (page - 1) * PAGE_SIZE
 
