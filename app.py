@@ -10,7 +10,7 @@ st.title("📊 Журнал ситуаций ШЧ")
 
 DB_PATH = "зсжд.db"
 FILE_ID = "1hJqrdYiL-pEqvMXYA_yLG2WNB_WofH0w"
-DB_URL = f"https://drive.google.com/uc?id={FILE_ID}"
+DB_URL = "https://www.dropbox.com/scl/fi/yqkiz7y5le2irthauw7r7/.db?rlkey=q35gz6kfd1cfog66ss9w4bfdn&st=q21ffzgq&dl=1"
 
 # --- Скачивание базы данных с Google Диска (через gdown) ---
 if not os.path.exists(DB_PATH):
