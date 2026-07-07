@@ -4,40 +4,66 @@ import sqlite3
 import os
 import requests
 
-# --- Скачивание базы данных с Google Диска (при первом запуске) ---
+# --- Параметры ---
 DB_PATH = "зсжд.db"
-DB_URL = "https://drive.google.com/uc?export=download&id=1hJqrdYiL-pEqvMXYA_yLG2WNB_WofH0w"
+DB_URL = "https://drive.google.com/uc?export=download&id=1hJqrdYiL-pEqvMXYA_yLG2WNB_WofH0w&confirm=t"
 
+# --- Скачивание базы данных ---
 if not os.path.exists(DB_PATH):
     with st.spinner("⏳ Загрузка базы данных (997 МБ)... Это может занять несколько минут."):
         try:
-            response = requests.get(DB_URL, stream=True)
+            response = requests.get(DB_URL, stream=True, timeout=120)
             response.raise_for_status()
+
+            # Проверяем, что скачался именно файл, а не HTML
+            content_type = response.headers.get('content-type', '')
+            if 'text/html' in content_type:
+                st.error("❌ Google Диск вернул HTML-страницу вместо файла. Возможно, нужно подтверждение. Попробуйте обновить страницу позже.")
+                st.stop()
+
             total_size = int(response.headers.get('content-length', 0))
             with open(DB_PATH, "wb") as f:
                 if total_size == 0:
                     f.write(response.content)
                 else:
                     downloaded = 0
+                    progress_bar = st.progress(0)
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
-                            if downloaded % (1024 * 1024) == 0:  # Каждые 1 МБ
-                                st.progress(min(downloaded / total_size, 1.0))
+                            progress = min(downloaded / total_size, 1.0)
+                            progress_bar.progress(progress)
             st.success("✅ База данных загружена!")
         except Exception as e:
             st.error(f"❌ Ошибка загрузки базы данных: {e}")
             st.stop()
+
+# --- Проверка, что база данных корректна ---
+if not os.path.exists(DB_PATH):
+    st.error("❌ Файл базы данных не найден.")
+    st.stop()
 
 # --- Подключение к БД ---
 @st.cache_resource
 def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-conn = get_conn()
+try:
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='incidents'")
+    if not cursor.fetchone():
+        st.error("❌ Таблица 'incidents' не найдена в базе данных. Проверьте файл.")
+        st.stop()
+except Exception as e:
+    st.error(f"❌ Ошибка подключения к базе данных: {e}")
+    st.stop()
 
-# --- Список столбцов для фильтров ---
+# --- Остальной код (фильтры, пагинация, отображение) ---
+st.set_page_config(page_title="Журнал ШЧ", layout="wide")
+st.title("📊 Журнал ситуаций ШЧ")
+
 FILTER_COLUMNS = [
     "Дата",
     "Дистанция",
@@ -47,7 +73,6 @@ FILTER_COLUMNS = [
     "Категория"
 ]
 
-# --- Функция для получения уникальных значений ---
 @st.cache_data
 def get_distinct_values(col_name):
     quoted = f'"{col_name}"'
@@ -59,7 +84,6 @@ def get_distinct_values(col_name):
         st.error(f"Ошибка при получении значений для {col_name}: {e}")
         return []
 
-# --- Получение общего количества записей ---
 @st.cache_data
 def get_total_count(where_clause="", params=None):
     if params is None:
@@ -71,9 +95,7 @@ def get_total_count(where_clause="", params=None):
     c.execute(query, params)
     return c.fetchone()[0]
 
-# --- Боковая панель с фильтрами ---
 st.sidebar.header("🔍 Фильтры")
-
 where_clauses = []
 params = []
 
@@ -116,28 +138,22 @@ for col in FILTER_COLUMNS:
             where_clauses.append(f'"{col}" IN ({placeholders})')
             params.extend(selected)
 
-# --- Пагинация ---
 where_sql = " AND ".join(where_clauses)
 total_rows = get_total_count(where_sql, params)
 PAGE_SIZE = 200
 total_pages = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
-
 page = st.sidebar.number_input("Страница", min_value=1, max_value=total_pages, value=1, step=1)
 offset = (page - 1) * PAGE_SIZE
 
-# --- Запрос данных ---
 query = "SELECT * FROM incidents"
 if where_sql:
     query += " WHERE " + where_sql
 query += f" LIMIT {PAGE_SIZE} OFFSET {offset}"
 
 df_page = pd.read_sql_query(query, conn, params=params)
-
 if not df_page.empty and "Дата" in df_page.columns:
     df_page["Дата"] = pd.to_datetime(df_page["Дата"], errors="coerce")
-
 df_page = df_page.fillna("")
 
-# --- Отображение ---
 st.subheader(f"📋 Данные (всего {total_rows:,}, показаны {offset+1}–{min(offset+PAGE_SIZE, total_rows)})")
 st.dataframe(df_page, use_container_width=True, height=600)
