@@ -4,35 +4,34 @@ import sqlite3
 import os
 import gdown
 
-# --- Конфигурация ---
 st.set_page_config(page_title="Журнал ШЧ", layout="wide")
 st.title("📊 Журнал ситуаций ШЧ")
 
 DB_PATH = "зсжд.db"
 FILE_ID = "1hJqrdYiL-pEqvMXYA_yLG2WNB_WofH0w"
-DB_URL = "https://www.dropbox.com/scl/fi/yqkiz7y5le2irthauw7r7/.db?rlkey=q35gz6kfd1cfog66ss9w4bfdn&st=q21ffzgq&dl=1"
+DB_URL = f"https://drive.google.com/uc?id={FILE_ID}"
 
-# --- Скачивание базы данных с Google Диска (через gdown) ---
+# --- Скачивание базы данных через gdown (обходит предупреждения Google) ---
 if not os.path.exists(DB_PATH):
     with st.spinner("⏳ Загрузка базы данных (997 МБ)... Это может занять несколько минут."):
         try:
-            # gdown скачивает файл, обходя предупреждения Google
+            # gdown скачивает и сразу сохраняет как зсжд.db
             gdown.download(DB_URL, DB_PATH, quiet=False)
             st.success("✅ База данных загружена!")
         except Exception as e:
             st.error(f"❌ Ошибка загрузки базы данных: {e}")
             st.stop()
 
-# --- Проверка, что файл является корректной SQLite-базой ---
+# --- Проверка, что база данных корректна ---
 try:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='incidents'")
     if not cursor.fetchone():
-        st.error("❌ Таблица 'incidents' не найдена в базе данных. Проверьте файл.")
+        st.error("❌ Таблица 'incidents' не найдена в базе данных.")
         st.stop()
 except sqlite3.DatabaseError as e:
-    st.error(f"❌ Файл повреждён или не является SQLite-базой: {e}")
+    st.error(f"❌ База данных повреждена или не является SQLite: {e}")
     st.stop()
 
 @st.cache_resource
@@ -41,7 +40,7 @@ def get_conn():
 
 conn = get_conn()
 
-# --- Фильтры и остальной код (без изменений) ---
+# --- Остальной код без изменений (фильтры, пагинация) ---
 FILTER_COLUMNS = [
     "Дата",
     "Дистанция",
