@@ -7,31 +7,33 @@ import gdown
 st.set_page_config(page_title="Журнал ШЧ", layout="wide")
 st.title("📊 Журнал ситуаций ШЧ")
 
+# --- Инициализация состояния ---
+if "data_loaded" not in st.session_state:
+    st.session_state.data_loaded = False
+
+# --- Загрузка БД (один раз при старте) ---
 DB_PATH = "зсжд.db"
 FILE_ID = "1hJqrdYiL-pEqvMXYA_yLG2WNB_WofH0w"
 DB_URL = f"https://drive.google.com/uc?id={FILE_ID}"
 
-# --- Скачивание базы данных через gdown (обходит предупреждения Google) ---
 if not os.path.exists(DB_PATH):
     with st.spinner("⏳ Загрузка базы данных (997 МБ)... Это может занять несколько минут."):
         try:
-            # gdown скачивает и сразу сохраняет как зсжд.db
             gdown.download(DB_URL, DB_PATH, quiet=False)
             st.success("✅ База данных загружена!")
         except Exception as e:
             st.error(f"❌ Ошибка загрузки базы данных: {e}")
             st.stop()
 
-# --- Проверка, что база данных корректна ---
 try:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='incidents'")
     if not cursor.fetchone():
-        st.error("❌ Таблица 'incidents' не найдена в базе данных.")
+        st.error("❌ Таблица 'incidents' не найдена.")
         st.stop()
 except sqlite3.DatabaseError as e:
-    st.error(f"❌ База данных повреждена или не является SQLite: {e}")
+    st.error(f"❌ База данных повреждена: {e}")
     st.stop()
 
 @st.cache_resource
@@ -40,7 +42,7 @@ def get_conn():
 
 conn = get_conn()
 
-# --- Остальной код без изменений (фильтры, пагинация) ---
+# --- Фильтры ---
 FILTER_COLUMNS = [
     "Дата",
     "Дистанция",
@@ -72,7 +74,13 @@ def get_total_count(where_clause="", params=None):
     c.execute(query, params)
     return c.fetchone()[0]
 
+# --- Боковая панель с фильтрами ---
 st.sidebar.header("🔍 Фильтры")
+
+# Храним выбранные фильтры в session_state, чтобы они не сбрасывались при нажатии кнопки
+if "filters" not in st.session_state:
+    st.session_state.filters = {}
+
 where_clauses = []
 params = []
 
@@ -97,6 +105,8 @@ for col in FILTER_COLUMNS:
                         min_value=min_date,
                         max_value=max_date
                     )
+                    # Сохраняем в сессию
+                    st.session_state.filters["date_range"] = (start_date, end_date)
                     where_clauses.append(f'"{col}" BETWEEN ? AND ?')
                     params.extend([start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")])
         except Exception as e:
@@ -114,24 +124,39 @@ for col in FILTER_COLUMNS:
             placeholders = ",".join(["?"] * len(selected))
             where_clauses.append(f'"{col}" IN ({placeholders})')
             params.extend(selected)
+            st.session_state.filters[col] = selected
+        else:
+            st.session_state.filters[col] = ["(Все)"]
 
-where_sql = " AND ".join(where_clauses)
-total_rows = get_total_count(where_sql, params)
-PAGE_SIZE = 200
-total_pages = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
+# --- Кнопка "Применить" ---
+apply_button = st.sidebar.button("🔎 Применить фильтры", type="primary")
 
-page = st.sidebar.number_input("Страница", min_value=1, max_value=total_pages, value=1, step=1)
-offset = (page - 1) * PAGE_SIZE
+if apply_button:
+    st.session_state.data_loaded = True
+    st.session_state.where_clauses = where_clauses
+    st.session_state.params = params
 
-query = "SELECT * FROM incidents"
-if where_sql:
-    query += " WHERE " + where_sql
-query += f" LIMIT {PAGE_SIZE} OFFSET {offset}"
+# --- Отображение данных (только если нажата кнопка) ---
+if st.session_state.data_loaded:
+    where_sql = " AND ".join(st.session_state.where_clauses)
+    total_rows = get_total_count(where_sql, st.session_state.params)
+    PAGE_SIZE = 200
+    total_pages = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
 
-df_page = pd.read_sql_query(query, conn, params=params)
-if not df_page.empty and "Дата" in df_page.columns:
-    df_page["Дата"] = pd.to_datetime(df_page["Дата"], errors="coerce")
-df_page = df_page.fillna("")
+    page = st.sidebar.number_input("Страница", min_value=1, max_value=total_pages, value=1, step=1)
+    offset = (page - 1) * PAGE_SIZE
 
-st.subheader(f"📋 Данные (всего {total_rows:,}, показаны {offset+1}–{min(offset+PAGE_SIZE, total_rows)})")
-st.dataframe(df_page, use_container_width=True, height=600)
+    query = "SELECT * FROM incidents"
+    if where_sql:
+        query += " WHERE " + where_sql
+    query += f" LIMIT {PAGE_SIZE} OFFSET {offset}"
+
+    df_page = pd.read_sql_query(query, conn, params=st.session_state.params)
+    if not df_page.empty and "Дата" in df_page.columns:
+        df_page["Дата"] = pd.to_datetime(df_page["Дата"], errors="coerce")
+    df_page = df_page.fillna("")
+
+    st.subheader(f"📋 Данные (всего {total_rows:,}, показаны {offset+1}–{min(offset+PAGE_SIZE, total_rows)})")
+    st.dataframe(df_page, use_container_width=True, height=600)
+else:
+    st.info("👈 Выберите фильтры в боковой панели и нажмите **«Применить фильтры»**, чтобы загрузить данные.")
