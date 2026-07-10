@@ -7,7 +7,7 @@ import gdown
 st.set_page_config(page_title="Журнал ШЧ", layout="wide")
 st.title("📊 Журнал ситуаций ШЧ")
 
-# --- Загрузка БД (один раз при старте) ---
+# --- Загрузка БД ---
 DB_PATH = "зсжд.db"
 FILE_ID = "1cYa6voTVf2OIk6K9rMMv8td8p_NLWXgi"
 DB_URL = f"https://drive.google.com/uc?id={FILE_ID}"
@@ -38,11 +38,32 @@ def get_conn():
 
 conn = get_conn()
 
-# --- Проверка и создание filter_cache, если её нет ---
+# --- ДИАГНОСТИКА ---
+st.sidebar.header("🔍 Диагностика")
+# Проверяем структуру таблицы incidents
 cursor = conn.cursor()
+cursor.execute("PRAGMA table_info(incidents)")
+columns_info = cursor.fetchall()
+st.sidebar.write("**Колонки в incidents:**")
+for col in columns_info:
+    st.sidebar.write(f"- {col[1]} ({col[2]})")
+
+# Проверяем наличие filter_cache
 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filter_cache'")
-if not cursor.fetchone():
-    st.warning("⏳ Создание кеша фильтров... Это может занять до минуты.")
+has_cache = cursor.fetchone() is not None
+st.sidebar.write(f"**Таблица filter_cache существует:** {has_cache}")
+
+if has_cache:
+    cursor.execute("SELECT COUNT(*) FROM filter_cache")
+    count = cursor.fetchone()[0]
+    st.sidebar.write(f"**Записей в filter_cache:** {count}")
+    if count > 0:
+        cursor.execute("SELECT DISTINCT filter_name FROM filter_cache")
+        names = [row[0] for row in cursor.fetchall()]
+        st.sidebar.write(f"**Имена фильтров в кеше:** {names}")
+else:
+    st.sidebar.warning("⚠️ Таблица filter_cache отсутствует. Сейчас она будет создана.")
+    # Создаём кеш
     try:
         cursor.execute("CREATE TABLE filter_cache (filter_name TEXT, value TEXT)")
         filter_columns = ["Дата", "Дистанция", "Перегон", "Код устройства", "Категория"]
@@ -51,32 +72,35 @@ if not cursor.fetchone():
             cursor.execute("PRAGMA table_info(incidents)")
             existing_cols = [row[1] for row in cursor.fetchall()]
             if col not in existing_cols:
+                st.sidebar.warning(f"Колонка {col} не найдена в incidents, пропускаем.")
                 continue
-            # Заполняем кеш
             query = f'INSERT INTO filter_cache (filter_name, value) SELECT "{col}", "{col}" FROM incidents WHERE "{col}" != "" GROUP BY "{col}" ORDER BY "{col}" COLLATE NOCASE'
             cursor.execute(query)
         conn.commit()
-        st.success("✅ Кеш фильтров создан!")
+        st.sidebar.success("✅ Кеш создан!")
     except Exception as e:
-        st.error(f"❌ Ошибка создания кеша: {e}")
-        st.stop()
+        st.sidebar.error(f"❌ Ошибка создания кеша: {e}")
 
-# --- Фильтры ---
-FILTER_COLUMNS = [
-    "Дата",
-    "Дистанция",
-    "Перегон",
-    "Код устройства",
-    "Диагностика/устранение",
-    "Категория"
-]
+# --- Фильтры (берём данные из кеша или напрямую) ---
+FILTER_COLUMNS = ["Дата", "Дистанция", "Перегон", "Код устройства", "Категория"]
 
 @st.cache_data
 def get_distinct_values(col_name):
-    query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
+    # Сначала пробуем из кеша
+    if has_cache:
+        query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
+        try:
+            df = pd.read_sql_query(query, conn)
+            if not df.empty:
+                return df["value"].tolist()
+        except:
+            pass
+    # Если кеш пуст или нет таблицы, берём напрямую (медленно, но хоть что-то)
+    quoted = f'"{col_name}"'
+    query = f"SELECT DISTINCT {quoted} FROM incidents WHERE {quoted} IS NOT NULL AND {quoted} != '' ORDER BY {quoted} COLLATE NOCASE"
     try:
         df = pd.read_sql_query(query, conn)
-        return df["value"].tolist()
+        return df[col_name].tolist()
     except Exception as e:
         st.error(f"Ошибка при получении значений для {col_name}: {e}")
         return []
@@ -88,9 +112,12 @@ for col in FILTER_COLUMNS:
             st.session_state[f"use_date_{col}"] = False
             values = get_distinct_values(col)
             if values:
-                min_date = pd.to_datetime(min(values)).date()
-                max_date = pd.to_datetime(max(values)).date()
-                st.session_state[f"date_range_{col}"] = (min_date, max_date)
+                try:
+                    min_date = pd.to_datetime(min(values)).date()
+                    max_date = pd.to_datetime(max(values)).date()
+                    st.session_state[f"date_range_{col}"] = (min_date, max_date)
+                except:
+                    pass
     else:
         if f"filter_{col}" not in st.session_state:
             st.session_state[f"filter_{col}"] = ["(Все)"]
@@ -102,20 +129,23 @@ for col in FILTER_COLUMNS:
     if col == "Дата":
         values = get_distinct_values(col)
         if values:
-            min_date = pd.to_datetime(min(values)).date()
-            max_date = pd.to_datetime(max(values)).date()
-            use_date = st.sidebar.checkbox(
-                f"Фильтр по {col}",
-                key=f"use_date_{col}"
-            )
-            if use_date:
-                st.sidebar.date_input(
-                    "Диапазон дат",
-                    value=st.session_state.get(f"date_range_{col}", (min_date, max_date)),
-                    min_value=min_date,
-                    max_value=max_date,
-                    key=f"date_range_{col}"
+            try:
+                min_date = pd.to_datetime(min(values)).date()
+                max_date = pd.to_datetime(max(values)).date()
+                use_date = st.sidebar.checkbox(
+                    f"Фильтр по {col}",
+                    key=f"use_date_{col}"
                 )
+                if use_date:
+                    st.sidebar.date_input(
+                        "Диапазон дат",
+                        value=st.session_state.get(f"date_range_{col}", (min_date, max_date)),
+                        min_value=min_date,
+                        max_value=max_date,
+                        key=f"date_range_{col}"
+                    )
+            except Exception as e:
+                st.sidebar.warning(f"Ошибка с датой: {e}")
     else:
         distinct_vals = get_distinct_values(col)
         if distinct_vals:
@@ -125,6 +155,8 @@ for col in FILTER_COLUMNS:
                 default=st.session_state.get(f"filter_{col}", ["(Все)"]),
                 key=f"filter_{col}"
             )
+        else:
+            st.sidebar.warning(f"Нет значений для {col}")
 
 # --- Кнопки ---
 col1, col2 = st.sidebar.columns(2)
@@ -139,9 +171,12 @@ if reset_button:
             st.session_state[f"use_date_{col}"] = False
             values = get_distinct_values(col)
             if values:
-                min_date = pd.to_datetime(min(values)).date()
-                max_date = pd.to_datetime(max(values)).date()
-                st.session_state[f"date_range_{col}"] = (min_date, max_date)
+                try:
+                    min_date = pd.to_datetime(min(values)).date()
+                    max_date = pd.to_datetime(max(values)).date()
+                    st.session_state[f"date_range_{col}"] = (min_date, max_date)
+                except:
+                    pass
         else:
             st.session_state[f"filter_{col}"] = ["(Все)"]
     st.session_state["data_loaded"] = False
@@ -150,7 +185,7 @@ if reset_button:
 if apply_button:
     st.session_state["data_loaded"] = True
 
-# --- Сбор параметров фильтрации ---
+# --- Загрузка данных ---
 if st.session_state.get("data_loaded", False):
     where_clauses = []
     params = []
