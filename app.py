@@ -38,69 +38,44 @@ def get_conn():
 
 conn = get_conn()
 
-# --- ДИАГНОСТИКА ---
-st.sidebar.header("🔍 Диагностика")
-# Проверяем структуру таблицы incidents
+# --- Проверка и создание filter_cache (если нет или пуста) ---
 cursor = conn.cursor()
-cursor.execute("PRAGMA table_info(incidents)")
-columns_info = cursor.fetchall()
-st.sidebar.write("**Колонки в incidents:**")
-for col in columns_info:
-    st.sidebar.write(f"- {col[1]} ({col[2]})")
-
-# Проверяем наличие filter_cache
 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filter_cache'")
 has_cache = cursor.fetchone() is not None
-st.sidebar.write(f"**Таблица filter_cache существует:** {has_cache}")
 
-if has_cache:
-    cursor.execute("SELECT COUNT(*) FROM filter_cache")
-    count = cursor.fetchone()[0]
-    st.sidebar.write(f"**Записей в filter_cache:** {count}")
-    if count > 0:
-        cursor.execute("SELECT DISTINCT filter_name FROM filter_cache")
-        names = [row[0] for row in cursor.fetchall()]
-        st.sidebar.write(f"**Имена фильтров в кеше:** {names}")
-else:
-    st.sidebar.warning("⚠️ Таблица filter_cache отсутствует. Сейчас она будет создана.")
-    # Создаём кеш
-    try:
-        cursor.execute("CREATE TABLE filter_cache (filter_name TEXT, value TEXT)")
+if not has_cache:
+    cursor.execute("CREATE TABLE filter_cache (filter_name TEXT, value TEXT)")
+    conn.commit()
+
+# Проверяем, есть ли данные в кеше
+cursor.execute("SELECT COUNT(*) FROM filter_cache")
+count = cursor.fetchone()[0]
+if count == 0:
+    with st.spinner("⏳ Создание кеша фильтров (это займёт минуту)..."):
         filter_columns = ["Дата", "Дистанция", "Перегон", "Код устройства", "Категория"]
         for col in filter_columns:
-            # Проверяем, существует ли колонка
+            # Проверяем существование колонки
             cursor.execute("PRAGMA table_info(incidents)")
             existing_cols = [row[1] for row in cursor.fetchall()]
             if col not in existing_cols:
-                st.sidebar.warning(f"Колонка {col} не найдена в incidents, пропускаем.")
                 continue
+            # Вставляем уникальные значения
             query = f'INSERT INTO filter_cache (filter_name, value) SELECT "{col}", "{col}" FROM incidents WHERE "{col}" != "" GROUP BY "{col}" ORDER BY "{col}" COLLATE NOCASE'
             cursor.execute(query)
         conn.commit()
-        st.sidebar.success("✅ Кеш создан!")
-    except Exception as e:
-        st.sidebar.error(f"❌ Ошибка создания кеша: {e}")
+        st.success("✅ Кеш фильтров создан!")
+        # Перезагружаем страницу, чтобы фильтры отобразились сразу
+        st.rerun()
 
-# --- Фильтры (берём данные из кеша или напрямую) ---
+# --- Фильтры ---
 FILTER_COLUMNS = ["Дата", "Дистанция", "Перегон", "Код устройства", "Категория"]
 
 @st.cache_data
 def get_distinct_values(col_name):
-    # Сначала пробуем из кеша
-    if has_cache:
-        query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
-        try:
-            df = pd.read_sql_query(query, conn)
-            if not df.empty:
-                return df["value"].tolist()
-        except:
-            pass
-    # Если кеш пуст или нет таблицы, берём напрямую (медленно, но хоть что-то)
-    quoted = f'"{col_name}"'
-    query = f"SELECT DISTINCT {quoted} FROM incidents WHERE {quoted} IS NOT NULL AND {quoted} != '' ORDER BY {quoted} COLLATE NOCASE"
+    query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
     try:
         df = pd.read_sql_query(query, conn)
-        return df[col_name].tolist()
+        return df["value"].tolist()
     except Exception as e:
         st.error(f"Ошибка при получении значений для {col_name}: {e}")
         return []
@@ -155,8 +130,6 @@ for col in FILTER_COLUMNS:
                 default=st.session_state.get(f"filter_{col}", ["(Все)"]),
                 key=f"filter_{col}"
             )
-        else:
-            st.sidebar.warning(f"Нет значений для {col}")
 
 # --- Кнопки ---
 col1, col2 = st.sidebar.columns(2)
