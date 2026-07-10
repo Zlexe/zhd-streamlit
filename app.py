@@ -13,7 +13,7 @@ if "data_loaded" not in st.session_state:
 
 # --- Загрузка БД (один раз при старте) ---
 DB_PATH = "зсжд.db"
-FILE_ID = "1hJqrdYiL-pEqvMXYA_yLG2WNB_WofH0w"
+FILE_ID = "1cYa6voTVf2OIk6K9rMMv8td8p_NLWXgi"  # <-- НОВЫЙ ID
 DB_URL = f"https://drive.google.com/uc?id={FILE_ID}"
 
 if not os.path.exists(DB_PATH):
@@ -42,6 +42,13 @@ def get_conn():
 
 conn = get_conn()
 
+# --- Проверка наличия таблицы filter_cache ---
+cursor = conn.cursor()
+cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filter_cache'")
+if not cursor.fetchone():
+    st.error("❌ Таблица filter_cache не найдена. База данных устарела, пересоздайте её.")
+    st.stop()
+
 # --- Фильтры ---
 FILTER_COLUMNS = [
     "Дата",
@@ -54,11 +61,11 @@ FILTER_COLUMNS = [
 
 @st.cache_data
 def get_distinct_values(col_name):
-    quoted = f'"{col_name}"'
-    query = f"SELECT DISTINCT {quoted} FROM incidents WHERE {quoted} IS NOT NULL AND {quoted} != '' ORDER BY {quoted} COLLATE NOCASE"
+    """Берём уникальные значения из таблицы-кеша (мгновенно)"""
+    query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
     try:
         df = pd.read_sql_query(query, conn)
-        return df[col_name].tolist()
+        return df["value"].tolist()
     except Exception as e:
         st.error(f"Ошибка при получении значений для {col_name}: {e}")
         return []
@@ -77,7 +84,6 @@ def get_total_count(where_clause="", params=None):
 # --- Боковая панель с фильтрами ---
 st.sidebar.header("🔍 Фильтры")
 
-# Храним выбранные фильтры в session_state, чтобы они не сбрасывались при нажатии кнопки
 if "filters" not in st.session_state:
     st.session_state.filters = {}
 
@@ -105,7 +111,6 @@ for col in FILTER_COLUMNS:
                         min_value=min_date,
                         max_value=max_date
                     )
-                    # Сохраняем в сессию
                     st.session_state.filters["date_range"] = (start_date, end_date)
                     where_clauses.append(f'"{col}" BETWEEN ? AND ?')
                     params.extend([start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")])
