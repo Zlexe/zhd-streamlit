@@ -10,10 +10,14 @@ st.title("📊 Журнал ситуаций ШЧ")
 # --- Инициализация состояния ---
 if "data_loaded" not in st.session_state:
     st.session_state.data_loaded = False
+if "filters" not in st.session_state:
+    st.session_state.filters = {}
+if "filter_values" not in st.session_state:
+    st.session_state.filter_values = {}
 
 # --- Загрузка БД (один раз при старте) ---
 DB_PATH = "зсжд.db"
-FILE_ID = "1cYa6voTVf2OIk6K9rMMv8td8p_NLWXgi"  # <-- НОВЫЙ ID
+FILE_ID = "1cYa6voTVf2OIk6K9rMMv8td8p_NLWXgi"
 DB_URL = f"https://drive.google.com/uc?id={FILE_ID}"
 
 if not os.path.exists(DB_PATH):
@@ -81,11 +85,37 @@ def get_total_count(where_clause="", params=None):
     c.execute(query, params)
     return c.fetchone()[0]
 
+# --- Функция сброса данных при изменении фильтра ---
+def reset_data_state():
+    st.session_state.data_loaded = False
+    # Очищаем сохранённые условия
+    st.session_state.where_clauses = []
+    st.session_state.params = []
+
+# --- Функция сброса всех фильтров ---
+def reset_all_filters():
+    for col in FILTER_COLUMNS:
+        if col != "Дата":
+            st.session_state.filter_values[col] = ["(Все)"]
+        else:
+            st.session_state.filter_values["date_range"] = None
+            st.session_state.filter_values["use_date_filter"] = False
+    st.session_state.data_loaded = False
+    st.session_state.where_clauses = []
+    st.session_state.params = []
+
 # --- Боковая панель с фильтрами ---
 st.sidebar.header("🔍 Фильтры")
 
-if "filters" not in st.session_state:
-    st.session_state.filters = {}
+# Инициализируем значения фильтров в session_state, если их нет
+for col in FILTER_COLUMNS:
+    if col not in st.session_state.filter_values:
+        if col == "Дата":
+            st.session_state.filter_values[col] = None
+            st.session_state.filter_values["use_date_filter"] = False
+            st.session_state.filter_values["date_range"] = None
+        else:
+            st.session_state.filter_values[col] = ["(Все)"]
 
 where_clauses = []
 params = []
@@ -103,15 +133,24 @@ for col in FILTER_COLUMNS:
             if values:
                 min_date = pd.to_datetime(min(values)).date()
                 max_date = pd.to_datetime(max(values)).date()
-                use_date_filter = st.sidebar.checkbox(f"Фильтр по {col}")
-                if use_date_filter:
+                # Чекбокс для включения фильтра по дате
+                use_date = st.sidebar.checkbox(
+                    f"Фильтр по {col}",
+                    value=st.session_state.filter_values.get("use_date_filter", False),
+                    key=f"use_date_{col}",
+                    on_change=reset_data_state
+                )
+                st.session_state.filter_values["use_date_filter"] = use_date
+                if use_date:
                     start_date, end_date = st.sidebar.date_input(
                         "Диапазон дат",
-                        value=(min_date, max_date),
+                        value=st.session_state.filter_values.get("date_range", (min_date, max_date)),
                         min_value=min_date,
-                        max_value=max_date
+                        max_value=max_date,
+                        key=f"date_range_{col}",
+                        on_change=reset_data_state
                     )
-                    st.session_state.filters["date_range"] = (start_date, end_date)
+                    st.session_state.filter_values["date_range"] = (start_date, end_date)
                     where_clauses.append(f'"{col}" BETWEEN ? AND ?')
                     params.extend([start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")])
         except Exception as e:
@@ -120,18 +159,19 @@ for col in FILTER_COLUMNS:
         distinct_vals = get_distinct_values(col)
         if not distinct_vals:
             continue
+        # Мультиселект
         selected = st.sidebar.multiselect(
             f"Фильтр по {col}",
             options=["(Все)"] + distinct_vals,
-            default=["(Все)"]
+            default=st.session_state.filter_values.get(col, ["(Все)"]),
+            key=f"multiselect_{col}",
+            on_change=reset_data_state
         )
+        st.session_state.filter_values[col] = selected
         if "(Все)" not in selected and selected:
             placeholders = ",".join(["?"] * len(selected))
             where_clauses.append(f'"{col}" IN ({placeholders})')
             params.extend(selected)
-            st.session_state.filters[col] = selected
-        else:
-            st.session_state.filters[col] = ["(Все)"]
 
 # --- Кнопка "Применить" ---
 apply_button = st.sidebar.button("🔎 Применить фильтры", type="primary")
@@ -141,7 +181,14 @@ if apply_button:
     st.session_state.where_clauses = where_clauses
     st.session_state.params = params
 
-# --- Отображение данных (только если нажата кнопка) ---
+# --- Кнопка "Сбросить фильтры" ---
+reset_button = st.sidebar.button("🔄 Сбросить фильтры", type="secondary")
+if reset_button:
+    reset_all_filters()
+    # Принудительно перезагружаем страницу (через rerun)
+    st.rerun()
+
+# --- Отображение данных (только если нажата кнопка "Применить") ---
 if st.session_state.data_loaded:
     where_sql = " AND ".join(st.session_state.where_clauses)
     total_rows = get_total_count(where_sql, st.session_state.params)
