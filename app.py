@@ -7,14 +7,6 @@ import gdown
 st.set_page_config(page_title="Журнал ШЧ", layout="wide")
 st.title("📊 Журнал ситуаций ШЧ")
 
-# --- Инициализация состояния ---
-if "data_loaded" not in st.session_state:
-    st.session_state.data_loaded = False
-if "filters" not in st.session_state:
-    st.session_state.filters = {}
-if "filter_values" not in st.session_state:
-    st.session_state.filter_values = {}
-
 # --- Загрузка БД (один раз при старте) ---
 DB_PATH = "зсжд.db"
 FILE_ID = "1cYa6voTVf2OIk6K9rMMv8td8p_NLWXgi"
@@ -53,6 +45,17 @@ if not cursor.fetchone():
     st.error("❌ Таблица filter_cache не найдена. База данных устарела, пересоздайте её.")
     st.stop()
 
+# --- Получение уникальных значений из кеша ---
+@st.cache_data
+def get_distinct_values(col_name):
+    query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
+    try:
+        df = pd.read_sql_query(query, conn)
+        return df["value"].tolist()
+    except Exception as e:
+        st.error(f"Ошибка при получении значений для {col_name}: {e}")
+        return []
+
 # --- Фильтры ---
 FILTER_COLUMNS = [
     "Дата",
@@ -63,135 +66,113 @@ FILTER_COLUMNS = [
     "Категория"
 ]
 
-@st.cache_data
-def get_distinct_values(col_name):
-    """Берём уникальные значения из таблицы-кеша (мгновенно)"""
-    query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
-    try:
-        df = pd.read_sql_query(query, conn)
-        return df["value"].tolist()
-    except Exception as e:
-        st.error(f"Ошибка при получении значений для {col_name}: {e}")
-        return []
-
-@st.cache_data
-def get_total_count(where_clause="", params=None):
-    if params is None:
-        params = []
-    c = conn.cursor()
-    query = "SELECT COUNT(*) FROM incidents"
-    if where_clause:
-        query += " WHERE " + where_clause
-    c.execute(query, params)
-    return c.fetchone()[0]
-
-# --- Функция сброса данных при изменении фильтра ---
-def reset_data_state():
-    st.session_state.data_loaded = False
-    # Очищаем сохранённые условия
-    st.session_state.where_clauses = []
-    st.session_state.params = []
-
-# --- Функция сброса всех фильтров ---
-def reset_all_filters():
-    for col in FILTER_COLUMNS:
-        if col != "Дата":
-            st.session_state.filter_values[col] = ["(Все)"]
-        else:
-            st.session_state.filter_values["date_range"] = None
-            st.session_state.filter_values["use_date_filter"] = False
-    st.session_state.data_loaded = False
-    st.session_state.where_clauses = []
-    st.session_state.params = []
-
-# --- Боковая панель с фильтрами ---
-st.sidebar.header("🔍 Фильтры")
-
-# Инициализируем значения фильтров в session_state, если их нет
+# Инициализация состояния фильтров
 for col in FILTER_COLUMNS:
-    if col not in st.session_state.filter_values:
-        if col == "Дата":
-            st.session_state.filter_values[col] = None
-            st.session_state.filter_values["use_date_filter"] = False
-            st.session_state.filter_values["date_range"] = None
-        else:
-            st.session_state.filter_values[col] = ["(Все)"]
-
-where_clauses = []
-params = []
-
-for col in FILTER_COLUMNS:
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(incidents)")
-    existing_cols = [row[1] for row in cursor.fetchall()]
-    if col not in existing_cols:
-        continue
-
     if col == "Дата":
-        try:
+        if f"use_date_{col}" not in st.session_state:
+            st.session_state[f"use_date_{col}"] = False
+        if f"date_range_{col}" not in st.session_state:
             values = get_distinct_values(col)
             if values:
                 min_date = pd.to_datetime(min(values)).date()
                 max_date = pd.to_datetime(max(values)).date()
-                # Чекбокс для включения фильтра по дате
-                use_date = st.sidebar.checkbox(
-                    f"Фильтр по {col}",
-                    value=st.session_state.filter_values.get("use_date_filter", False),
-                    key=f"use_date_{col}",
-                    on_change=reset_data_state
+                st.session_state[f"date_range_{col}"] = (min_date, max_date)
+    else:
+        if f"filter_{col}" not in st.session_state:
+            st.session_state[f"filter_{col}"] = ["(Все)"]
+
+# --- Боковая панель с фильтрами ---
+st.sidebar.header("🔍 Фильтры")
+
+# Рисуем фильтры
+for col in FILTER_COLUMNS:
+    if col == "Дата":
+        values = get_distinct_values(col)
+        if values:
+            min_date = pd.to_datetime(min(values)).date()
+            max_date = pd.to_datetime(max(values)).date()
+            use_date = st.sidebar.checkbox(
+                f"Фильтр по {col}",
+                key=f"use_date_{col}"
+            )
+            if use_date:
+                st.sidebar.date_input(
+                    "Диапазон дат",
+                    value=st.session_state.get(f"date_range_{col}", (min_date, max_date)),
+                    min_value=min_date,
+                    max_value=max_date,
+                    key=f"date_range_{col}"
                 )
-                st.session_state.filter_values["use_date_filter"] = use_date
-                if use_date:
-                    start_date, end_date = st.sidebar.date_input(
-                        "Диапазон дат",
-                        value=st.session_state.filter_values.get("date_range", (min_date, max_date)),
-                        min_value=min_date,
-                        max_value=max_date,
-                        key=f"date_range_{col}",
-                        on_change=reset_data_state
-                    )
-                    st.session_state.filter_values["date_range"] = (start_date, end_date)
-                    where_clauses.append(f'"{col}" BETWEEN ? AND ?')
-                    params.extend([start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")])
-        except Exception as e:
-            st.warning(f"Не удалось создать фильтр по дате: {e}")
     else:
         distinct_vals = get_distinct_values(col)
-        if not distinct_vals:
-            continue
-        # Мультиселект
-        selected = st.sidebar.multiselect(
-            f"Фильтр по {col}",
-            options=["(Все)"] + distinct_vals,
-            default=st.session_state.filter_values.get(col, ["(Все)"]),
-            key=f"multiselect_{col}",
-            on_change=reset_data_state
-        )
-        st.session_state.filter_values[col] = selected
-        if "(Все)" not in selected and selected:
-            placeholders = ",".join(["?"] * len(selected))
-            where_clauses.append(f'"{col}" IN ({placeholders})')
-            params.extend(selected)
+        if distinct_vals:
+            st.sidebar.multiselect(
+                f"Фильтр по {col}",
+                options=["(Все)"] + distinct_vals,
+                default=st.session_state.get(f"filter_{col}", ["(Все)"]),
+                key=f"filter_{col}"
+            )
 
-# --- Кнопка "Применить" ---
-apply_button = st.sidebar.button("🔎 Применить фильтры", type="primary")
+# --- Кнопки ---
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    apply_button = st.button("🔎 Применить", type="primary", use_container_width=True)
+with col2:
+    reset_button = st.button("🔄 Сбросить", type="secondary", use_container_width=True)
 
-if apply_button:
-    st.session_state.data_loaded = True
-    st.session_state.where_clauses = where_clauses
-    st.session_state.params = params
-
-# --- Кнопка "Сбросить фильтры" ---
-reset_button = st.sidebar.button("🔄 Сбросить фильтры", type="secondary")
+# --- Логика кнопок ---
 if reset_button:
-    reset_all_filters()
-    # Принудительно перезагружаем страницу (через rerun)
+    # Сброс всех фильтров
+    for col in FILTER_COLUMNS:
+        if col == "Дата":
+            st.session_state[f"use_date_{col}"] = False
+            values = get_distinct_values(col)
+            if values:
+                min_date = pd.to_datetime(min(values)).date()
+                max_date = pd.to_datetime(max(values)).date()
+                st.session_state[f"date_range_{col}"] = (min_date, max_date)
+        else:
+            st.session_state[f"filter_{col}"] = ["(Все)"]
+    st.session_state["data_loaded"] = False
     st.rerun()
 
-# --- Отображение данных (только если нажата кнопка "Применить") ---
-if st.session_state.data_loaded:
-    where_sql = " AND ".join(st.session_state.where_clauses)
-    total_rows = get_total_count(where_sql, st.session_state.params)
+if apply_button:
+    st.session_state["data_loaded"] = True
+
+# --- Сбор параметров фильтрации (только если data_loaded) ---
+if st.session_state.get("data_loaded", False):
+    where_clauses = []
+    params = []
+
+    for col in FILTER_COLUMNS:
+        if col == "Дата":
+            if st.session_state.get(f"use_date_{col}", False):
+                date_range = st.session_state.get(f"date_range_{col}")
+                if date_range and len(date_range) == 2:
+                    start_date, end_date = date_range
+                    where_clauses.append(f'"{col}" BETWEEN ? AND ?')
+                    params.extend([start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")])
+        else:
+            selected = st.session_state.get(f"filter_{col}", ["(Все)"])
+            if "(Все)" not in selected and selected:
+                placeholders = ",".join(["?"] * len(selected))
+                where_clauses.append(f'"{col}" IN ({placeholders})')
+                params.extend(selected)
+
+    # --- Пагинация и загрузка данных ---
+    @st.cache_data
+    def get_total_count(where_clause="", params=None):
+        if params is None:
+            params = []
+        c = conn.cursor()
+        query = "SELECT COUNT(*) FROM incidents"
+        if where_clause:
+            query += " WHERE " + where_clause
+        c.execute(query, params)
+        return c.fetchone()[0]
+
+    where_sql = " AND ".join(where_clauses)
+    total_rows = get_total_count(where_sql, params)
     PAGE_SIZE = 200
     total_pages = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
 
@@ -203,7 +184,7 @@ if st.session_state.data_loaded:
         query += " WHERE " + where_sql
     query += f" LIMIT {PAGE_SIZE} OFFSET {offset}"
 
-    df_page = pd.read_sql_query(query, conn, params=st.session_state.params)
+    df_page = pd.read_sql_query(query, conn, params=params)
     if not df_page.empty and "Дата" in df_page.columns:
         df_page["Дата"] = pd.to_datetime(df_page["Дата"], errors="coerce")
     df_page = df_page.fillna("")
@@ -211,4 +192,4 @@ if st.session_state.data_loaded:
     st.subheader(f"📋 Данные (всего {total_rows:,}, показаны {offset+1}–{min(offset+PAGE_SIZE, total_rows)})")
     st.dataframe(df_page, use_container_width=True, height=600)
 else:
-    st.info("👈 Выберите фильтры в боковой панели и нажмите **«Применить фильтры»**, чтобы загрузить данные.")
+    st.info("👈 Выберите фильтры в боковой панели и нажмите **«Применить»**, чтобы загрузить данные.")
