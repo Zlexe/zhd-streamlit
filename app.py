@@ -38,7 +38,7 @@ def get_conn():
 
 conn = get_conn()
 
-# --- Проверка и создание filter_cache (если нет или пуста) ---
+# --- Проверка и создание filter_cache (без вывода) ---
 cursor = conn.cursor()
 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filter_cache'")
 has_cache = cursor.fetchone() is not None
@@ -46,36 +46,51 @@ has_cache = cursor.fetchone() is not None
 if not has_cache:
     cursor.execute("CREATE TABLE filter_cache (filter_name TEXT, value TEXT)")
     conn.commit()
-
-# Проверяем, есть ли данные в кеше
-cursor.execute("SELECT COUNT(*) FROM filter_cache")
-count = cursor.fetchone()[0]
-if count == 0:
-    with st.spinner("⏳ Создание кеша фильтров (это займёт минуту)..."):
+    filter_columns = ["Дата", "Дистанция", "Перегон", "Код устройства", "Категория"]
+    for col in filter_columns:
+        cursor.execute("PRAGMA table_info(incidents)")
+        existing_cols = [row[1] for row in cursor.fetchall()]
+        if col not in existing_cols:
+            continue
+        query = f'INSERT INTO filter_cache (filter_name, value) SELECT "{col}", "{col}" FROM incidents WHERE "{col}" != "" GROUP BY "{col}" ORDER BY "{col}" COLLATE NOCASE'
+        cursor.execute(query)
+    conn.commit()
+    has_cache = True
+else:
+    # Проверяем, есть ли данные в кеше (если пуст, заполняем)
+    cursor.execute("SELECT COUNT(*) FROM filter_cache")
+    count = cursor.fetchone()[0]
+    if count == 0:
         filter_columns = ["Дата", "Дистанция", "Перегон", "Код устройства", "Категория"]
         for col in filter_columns:
-            # Проверяем существование колонки
             cursor.execute("PRAGMA table_info(incidents)")
             existing_cols = [row[1] for row in cursor.fetchall()]
             if col not in existing_cols:
                 continue
-            # Вставляем уникальные значения
             query = f'INSERT INTO filter_cache (filter_name, value) SELECT "{col}", "{col}" FROM incidents WHERE "{col}" != "" GROUP BY "{col}" ORDER BY "{col}" COLLATE NOCASE'
             cursor.execute(query)
         conn.commit()
-        st.success("✅ Кеш фильтров создан!")
-        # Перезагружаем страницу, чтобы фильтры отобразились сразу
-        st.rerun()
 
-# --- Фильтры ---
+# --- Фильтры (берём данные из кеша или напрямую) ---
 FILTER_COLUMNS = ["Дата", "Дистанция", "Перегон", "Код устройства", "Категория"]
 
 @st.cache_data
 def get_distinct_values(col_name):
-    query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
+    # Сначала пробуем из кеша
+    if has_cache:
+        query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
+        try:
+            df = pd.read_sql_query(query, conn)
+            if not df.empty:
+                return df["value"].tolist()
+        except:
+            pass
+    # Если кеш пуст или нет таблицы, берём напрямую (медленно, но хоть что-то)
+    quoted = f'"{col_name}"'
+    query = f"SELECT DISTINCT {quoted} FROM incidents WHERE {quoted} IS NOT NULL AND {quoted} != '' ORDER BY {quoted} COLLATE NOCASE"
     try:
         df = pd.read_sql_query(query, conn)
-        return df["value"].tolist()
+        return df[col_name].tolist()
     except Exception as e:
         st.error(f"Ошибка при получении значений для {col_name}: {e}")
         return []
@@ -130,6 +145,8 @@ for col in FILTER_COLUMNS:
                 default=st.session_state.get(f"filter_{col}", ["(Все)"]),
                 key=f"filter_{col}"
             )
+        else:
+            st.sidebar.warning(f"Нет значений для {col}")
 
 # --- Кнопки ---
 col1, col2 = st.sidebar.columns(2)
