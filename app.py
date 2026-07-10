@@ -38,23 +38,28 @@ def get_conn():
 
 conn = get_conn()
 
-# --- Проверка наличия таблицы filter_cache ---
+# --- Проверка и создание filter_cache, если её нет ---
 cursor = conn.cursor()
 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='filter_cache'")
 if not cursor.fetchone():
-    st.error("❌ Таблица filter_cache не найдена. База данных устарела, пересоздайте её.")
-    st.stop()
-
-# --- Получение уникальных значений из кеша ---
-@st.cache_data
-def get_distinct_values(col_name):
-    query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
+    st.warning("⏳ Создание кеша фильтров... Это может занять до минуты.")
     try:
-        df = pd.read_sql_query(query, conn)
-        return df["value"].tolist()
+        cursor.execute("CREATE TABLE filter_cache (filter_name TEXT, value TEXT)")
+        filter_columns = ["Дата", "Дистанция", "Перегон", "Код устройства", "Категория"]
+        for col in filter_columns:
+            # Проверяем, существует ли колонка
+            cursor.execute("PRAGMA table_info(incidents)")
+            existing_cols = [row[1] for row in cursor.fetchall()]
+            if col not in existing_cols:
+                continue
+            # Заполняем кеш
+            query = f'INSERT INTO filter_cache (filter_name, value) SELECT "{col}", "{col}" FROM incidents WHERE "{col}" != "" GROUP BY "{col}" ORDER BY "{col}" COLLATE NOCASE'
+            cursor.execute(query)
+        conn.commit()
+        st.success("✅ Кеш фильтров создан!")
     except Exception as e:
-        st.error(f"Ошибка при получении значений для {col_name}: {e}")
-        return []
+        st.error(f"❌ Ошибка создания кеша: {e}")
+        st.stop()
 
 # --- Фильтры ---
 FILTER_COLUMNS = [
@@ -66,12 +71,21 @@ FILTER_COLUMNS = [
     "Категория"
 ]
 
-# Инициализация состояния фильтров
+@st.cache_data
+def get_distinct_values(col_name):
+    query = f'SELECT value FROM filter_cache WHERE filter_name = "{col_name}" ORDER BY value COLLATE NOCASE'
+    try:
+        df = pd.read_sql_query(query, conn)
+        return df["value"].tolist()
+    except Exception as e:
+        st.error(f"Ошибка при получении значений для {col_name}: {e}")
+        return []
+
+# --- Инициализация состояния фильтров ---
 for col in FILTER_COLUMNS:
     if col == "Дата":
         if f"use_date_{col}" not in st.session_state:
             st.session_state[f"use_date_{col}"] = False
-        if f"date_range_{col}" not in st.session_state:
             values = get_distinct_values(col)
             if values:
                 min_date = pd.to_datetime(min(values)).date()
@@ -84,7 +98,6 @@ for col in FILTER_COLUMNS:
 # --- Боковая панель с фильтрами ---
 st.sidebar.header("🔍 Фильтры")
 
-# Рисуем фильтры
 for col in FILTER_COLUMNS:
     if col == "Дата":
         values = get_distinct_values(col)
@@ -120,9 +133,7 @@ with col1:
 with col2:
     reset_button = st.button("🔄 Сбросить", type="secondary", use_container_width=True)
 
-# --- Логика кнопок ---
 if reset_button:
-    # Сброс всех фильтров
     for col in FILTER_COLUMNS:
         if col == "Дата":
             st.session_state[f"use_date_{col}"] = False
@@ -139,7 +150,7 @@ if reset_button:
 if apply_button:
     st.session_state["data_loaded"] = True
 
-# --- Сбор параметров фильтрации (только если data_loaded) ---
+# --- Сбор параметров фильтрации ---
 if st.session_state.get("data_loaded", False):
     where_clauses = []
     params = []
@@ -159,7 +170,6 @@ if st.session_state.get("data_loaded", False):
                 where_clauses.append(f'"{col}" IN ({placeholders})')
                 params.extend(selected)
 
-    # --- Пагинация и загрузка данных ---
     @st.cache_data
     def get_total_count(where_clause="", params=None):
         if params is None:
