@@ -320,12 +320,21 @@ if st.session_state.get("data_loaded", False):
                 df["total_min"] = df["total_sec"] / 60
                 return df
 
+            # Единый хелпер: переименовывает "val"/"cnt" (или любые техн. имена колонок)
+            # в понятные подписи — они же попадают в легенду и во всплывающую подсказку графика.
+            def plot_bar(df, value_col, label_name, value_name, chart_col=st):
+                renamed = df.rename(columns={"val": label_name, value_col: value_name})
+                chart_col.bar_chart(renamed.set_index(label_name)[value_name])
+
             # --- Динамика по месяцам ---
             st.markdown("**Динамика количества инцидентов по месяцам**")
             df_monthly = get_monthly_counts(where_sql, params)
             df_monthly = df_monthly.dropna(subset=["month"])
             if not df_monthly.empty:
-                st.line_chart(df_monthly.set_index("month")["cnt"])
+                df_monthly_named = df_monthly.rename(
+                    columns={"month": "Месяц", "cnt": "Количество инцидентов"}
+                )
+                st.line_chart(df_monthly_named.set_index("Месяц")["Количество инцидентов"])
             else:
                 st.caption("Нет данных для построения динамики (проверьте формат столбца «Дата»).")
 
@@ -335,7 +344,7 @@ if st.session_state.get("data_loaded", False):
                 st.markdown("**По категориям**")
                 df_cat = get_group_counts("Категория", where_sql, params)
                 if not df_cat.empty:
-                    st.bar_chart(df_cat.set_index("val")["cnt"])
+                    plot_bar(df_cat, "cnt", "Категория", "Количество инцидентов", col_a)
                 else:
                     st.caption("Нет данных по категориям.")
 
@@ -343,7 +352,7 @@ if st.session_state.get("data_loaded", False):
                 st.markdown("**Топ-20 кодов устройств**")
                 df_dev = get_group_counts("Код устройства", where_sql, params, limit=20)
                 if not df_dev.empty:
-                    st.bar_chart(df_dev.set_index("val")["cnt"])
+                    plot_bar(df_dev, "cnt", "Код устройства", "Количество инцидентов", col_b)
                 else:
                     st.caption("Нет данных по кодам устройств.")
 
@@ -353,7 +362,7 @@ if st.session_state.get("data_loaded", False):
                 st.markdown("**Топ-20 перегонов**")
                 df_seg = get_group_counts("Перегон", where_sql, params, limit=20)
                 if not df_seg.empty:
-                    st.bar_chart(df_seg.set_index("val")["cnt"])
+                    plot_bar(df_seg, "cnt", "Перегон", "Количество инцидентов", col_c)
                 else:
                     st.caption("Нет данных по перегонам.")
 
@@ -361,24 +370,19 @@ if st.session_state.get("data_loaded", False):
                 st.markdown("**Топ-20 дистанций**")
                 df_dist = get_group_counts("Дистанция", where_sql, params, limit=20)
                 if not df_dist.empty:
-                    st.bar_chart(df_dist.set_index("val")["cnt"])
+                    plot_bar(df_dist, "cnt", "Дистанция", "Количество инцидентов", col_d)
                 else:
                     st.caption("Нет данных по дистанциям.")
 
             st.markdown("**Топ-20 видов неисправностей**")
             df_kind = get_group_counts("Вид неисправности", where_sql, params, limit=20)
             if not df_kind.empty:
-                st.bar_chart(df_kind.set_index("val")["cnt"])
+                plot_bar(df_kind, "cnt", "Вид неисправности", "Количество инцидентов")
             else:
                 st.caption("Нет данных по видам неисправностей.")
 
             st.divider()
             st.markdown("### ⏱️ Длительность инцидентов")
-            st.caption(
-                "Предположение: столбец «Время окончания» хранит длительность инцидента в формате "
-                "ЧЧ:ММ:СС, а не время суток. Если это не так — эти три графика будут некорректны, "
-                "скажи, что там на самом деле хранится."
-            )
 
             col_e, col_f = st.columns(2)
 
@@ -386,7 +390,10 @@ if st.session_state.get("data_loaded", False):
                 st.markdown("**Распределение по длительности**")
                 df_buckets = get_duration_buckets(where_sql, params)
                 if not df_buckets.empty:
-                    st.bar_chart(df_buckets.set_index("bucket")["cnt"])
+                    df_buckets_named = df_buckets.rename(
+                        columns={"bucket": "Длительность", "cnt": "Количество инцидентов"}
+                    )
+                    col_e.bar_chart(df_buckets_named.set_index("Длительность")["Количество инцидентов"])
                 else:
                     st.caption("Не удалось посчитать длительности.")
 
@@ -394,14 +401,14 @@ if st.session_state.get("data_loaded", False):
                 st.markdown("**Суммарный простой по категориям, мин**")
                 df_dur_cat = get_duration_sum_by("Категория", where_sql, params)
                 if not df_dur_cat.empty:
-                    st.bar_chart(df_dur_cat.set_index("val")["total_min"])
+                    plot_bar(df_dur_cat, "total_min", "Категория", "Суммарный простой, мин", col_f)
                 else:
                     st.caption("Не удалось посчитать длительности по категориям.")
 
             st.markdown("**Топ-20 видов неисправностей по суммарному простою, мин**")
             df_dur_kind = get_duration_sum_by("Вид неисправности", where_sql, params, limit=20)
             if not df_dur_kind.empty:
-                st.bar_chart(df_dur_kind.set_index("val")["total_min"])
+                plot_bar(df_dur_kind, "total_min", "Вид неисправности", "Суммарный простой, мин")
             else:
                 st.caption("Не удалось посчитать длительности по видам неисправностей.")
 else:
