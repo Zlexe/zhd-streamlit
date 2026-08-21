@@ -175,8 +175,8 @@ if reset_button:
 if apply_button:
     st.session_state["data_loaded"] = True
 
-# --- Загрузка данных ---
-if st.session_state.get("data_loaded", False):
+# --- Сборка WHERE-условия по текущим фильтрам (используется и таблицей, и графиками) ---
+def build_where():
     where_clauses = []
     params = []
 
@@ -195,6 +195,12 @@ if st.session_state.get("data_loaded", False):
                 where_clauses.append(f'"{col}" IN ({placeholders})')
                 params.extend(selected)
 
+    return " AND ".join(where_clauses), params
+
+# --- Загрузка данных ---
+if st.session_state.get("data_loaded", False):
+    where_sql, params = build_where()
+
     @st.cache_data
     def get_total_count(where_clause="", params=None):
         if params is None:
@@ -206,25 +212,197 @@ if st.session_state.get("data_loaded", False):
         c.execute(query, params)
         return c.fetchone()[0]
 
-    where_sql = " AND ".join(where_clauses)
     total_rows = get_total_count(where_sql, params)
-    PAGE_SIZE = 200
-    total_pages = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
 
-    page = st.sidebar.number_input("Страница", min_value=1, max_value=total_pages, value=1, step=1)
-    offset = (page - 1) * PAGE_SIZE
+    tab_table, tab_charts = st.tabs(["📋 Таблица", "📈 Графики"])
 
-    query = "SELECT * FROM incidents"
-    if where_sql:
-        query += " WHERE " + where_sql
-    query += f" LIMIT {PAGE_SIZE} OFFSET {offset}"
+    # ==================== ТАБЛИЦА ====================
+    with tab_table:
+        PAGE_SIZE = 200
+        total_pages = max(1, (total_rows + PAGE_SIZE - 1) // PAGE_SIZE)
 
-    df_page = pd.read_sql_query(query, conn, params=params)
-    if not df_page.empty and "Дата" in df_page.columns:
-        df_page["Дата"] = pd.to_datetime(df_page["Дата"], errors="coerce")
-    df_page = df_page.fillna("")
+        page = st.number_input("Страница", min_value=1, max_value=total_pages, value=1, step=1)
+        offset = (page - 1) * PAGE_SIZE
 
-    st.subheader(f"📋 Данные (всего {total_rows:,}, показаны {offset+1}–{min(offset+PAGE_SIZE, total_rows)})")
-    st.dataframe(df_page, use_container_width=True, height=600)
+        query = "SELECT * FROM incidents"
+        if where_sql:
+            query += " WHERE " + where_sql
+        query += f" LIMIT {PAGE_SIZE} OFFSET {offset}"
+
+        df_page = pd.read_sql_query(query, conn, params=params)
+        if not df_page.empty and "Дата" in df_page.columns:
+            df_page["Дата"] = pd.to_datetime(df_page["Дата"], errors="coerce")
+        df_page = df_page.fillna("")
+
+        st.subheader(f"📋 Данные (всего {total_rows:,}, показаны {offset+1}–{min(offset+PAGE_SIZE, total_rows)})")
+        st.dataframe(df_page, use_container_width=True, height=600)
+
+    # ==================== ГРАФИКИ ====================
+    with tab_charts:
+        st.subheader(f"📈 Статистика по всей выборке ({total_rows:,} записей)")
+
+        if total_rows == 0:
+            st.info("Нет данных под текущие фильтры.")
+        else:
+            # Кешируем агрегированные запросы по (where_sql, params) — считаются по ВСЕЙ выборке в БД,
+            # а не только по текущей странице таблицы.
+            @st.cache_data
+            def get_group_counts(group_col, where_clause, params, limit=None):
+                q = f'SELECT "{group_col}" AS val, COUNT(*) AS cnt FROM incidents'
+                if where_clause:
+                    q += " WHERE " + where_clause
+                q += f' GROUP BY "{group_col}" ORDER BY cnt DESC'
+                if limit:
+                    q += f" LIMIT {limit}"
+                return pd.read_sql_query(q, conn, params=params)
+
+            @st.cache_data
+            def get_monthly_counts(where_clause, params):
+                # Группировка по Unix-времени, а не по строке "Дата" — надёжнее,
+                # т.к. не зависит от текстового формата даты в разных источниках.
+                q = (
+                    'SELECT strftime(\'%Y-%m\', "Unix время", \'unixepoch\') AS month, COUNT(*) AS cnt '
+                    'FROM incidents'
+                )
+                if where_clause:
+                    q += " WHERE " + where_clause
+                q += " GROUP BY month ORDER BY month"
+                return pd.read_sql_query(q, conn, params=params)
+
+            # Длительность инцидента (сек) из "Время окончания", если это ЧЧ:ММ:СС-длительность,
+            # а не время суток. Формула безопасна: некорректные/пустые строки дадут NULL и уйдут из агрегатов.
+            DURATION_EXPR = (
+                '(CAST(substr("Время окончания",1,2) AS INTEGER)*3600 '
+                '+ CAST(substr("Время окончания",4,2) AS INTEGER)*60 '
+                '+ CAST(substr("Время окончания",7,2) AS INTEGER))'
+            )
+
+            @st.cache_data
+            def get_duration_buckets(where_clause, params):
+                q = f'''
+                    SELECT bucket, cnt FROM (
+                        SELECT
+                            CASE
+                                WHEN dur < 10 THEN '1: <10 сек'
+                                WHEN dur < 60 THEN '2: 10–60 сек'
+                                WHEN dur < 300 THEN '3: 1–5 мин'
+                                WHEN dur < 1800 THEN '4: 5–30 мин'
+                                ELSE '5: >30 мин'
+                            END AS bucket,
+                            COUNT(*) AS cnt
+                        FROM (
+                            SELECT {DURATION_EXPR} AS dur FROM incidents
+                            {"WHERE " + where_clause if where_clause else ""}
+                        )
+                        WHERE dur IS NOT NULL
+                        GROUP BY bucket
+                    )
+                    ORDER BY bucket
+                '''
+                df = pd.read_sql_query(q, conn, params=params)
+                df["bucket"] = df["bucket"].str.slice(3)  # убрать сортировочный префикс "N: "
+                return df
+
+            @st.cache_data
+            def get_duration_sum_by(group_col, where_clause, params, limit=None):
+                q = f'''
+                    SELECT val, SUM(dur) AS total_sec, COUNT(*) AS cnt FROM (
+                        SELECT "{group_col}" AS val, {DURATION_EXPR} AS dur FROM incidents
+                        {"WHERE " + where_clause if where_clause else ""}
+                    )
+                    WHERE dur IS NOT NULL
+                    GROUP BY val
+                    ORDER BY total_sec DESC
+                '''
+                if limit:
+                    q += f" LIMIT {limit}"
+                df = pd.read_sql_query(q, conn, params=params)
+                df["total_min"] = df["total_sec"] / 60
+                return df
+
+            # --- Динамика по месяцам ---
+            st.markdown("**Динамика количества инцидентов по месяцам**")
+            df_monthly = get_monthly_counts(where_sql, params)
+            df_monthly = df_monthly.dropna(subset=["month"])
+            if not df_monthly.empty:
+                st.line_chart(df_monthly.set_index("month")["cnt"])
+            else:
+                st.caption("Нет данных для построения динамики (проверьте формат столбца «Дата»).")
+
+            col_a, col_b = st.columns(2)
+
+            with col_a:
+                st.markdown("**По категориям**")
+                df_cat = get_group_counts("Категория", where_sql, params)
+                if not df_cat.empty:
+                    st.bar_chart(df_cat.set_index("val")["cnt"])
+                else:
+                    st.caption("Нет данных по категориям.")
+
+            with col_b:
+                st.markdown("**Топ-20 кодов устройств**")
+                df_dev = get_group_counts("Код устройства", where_sql, params, limit=20)
+                if not df_dev.empty:
+                    st.bar_chart(df_dev.set_index("val")["cnt"])
+                else:
+                    st.caption("Нет данных по кодам устройств.")
+
+            col_c, col_d = st.columns(2)
+
+            with col_c:
+                st.markdown("**Топ-20 перегонов**")
+                df_seg = get_group_counts("Перегон", where_sql, params, limit=20)
+                if not df_seg.empty:
+                    st.bar_chart(df_seg.set_index("val")["cnt"])
+                else:
+                    st.caption("Нет данных по перегонам.")
+
+            with col_d:
+                st.markdown("**Топ-20 дистанций**")
+                df_dist = get_group_counts("Дистанция", where_sql, params, limit=20)
+                if not df_dist.empty:
+                    st.bar_chart(df_dist.set_index("val")["cnt"])
+                else:
+                    st.caption("Нет данных по дистанциям.")
+
+            st.markdown("**Топ-20 видов неисправностей**")
+            df_kind = get_group_counts("Вид неисправности", where_sql, params, limit=20)
+            if not df_kind.empty:
+                st.bar_chart(df_kind.set_index("val")["cnt"])
+            else:
+                st.caption("Нет данных по видам неисправностей.")
+
+            st.divider()
+            st.markdown("### ⏱️ Длительность инцидентов")
+            st.caption(
+                "Предположение: столбец «Время окончания» хранит длительность инцидента в формате "
+                "ЧЧ:ММ:СС, а не время суток. Если это не так — эти три графика будут некорректны, "
+                "скажи, что там на самом деле хранится."
+            )
+
+            col_e, col_f = st.columns(2)
+
+            with col_e:
+                st.markdown("**Распределение по длительности**")
+                df_buckets = get_duration_buckets(where_sql, params)
+                if not df_buckets.empty:
+                    st.bar_chart(df_buckets.set_index("bucket")["cnt"])
+                else:
+                    st.caption("Не удалось посчитать длительности.")
+
+            with col_f:
+                st.markdown("**Суммарный простой по категориям, мин**")
+                df_dur_cat = get_duration_sum_by("Категория", where_sql, params)
+                if not df_dur_cat.empty:
+                    st.bar_chart(df_dur_cat.set_index("val")["total_min"])
+                else:
+                    st.caption("Не удалось посчитать длительности по категориям.")
+
+            st.markdown("**Топ-20 видов неисправностей по суммарному простою, мин**")
+            df_dur_kind = get_duration_sum_by("Вид неисправности", where_sql, params, limit=20)
+            if not df_dur_kind.empty:
+                st.bar_chart(df_dur_kind.set_index("val")["total_min"])
+            else:
+                st.caption("Не удалось посчитать длительности по видам неисправностей.")
 else:
     st.info("👈 Выберите фильтры в боковой панели и нажмите **«Применить»**, чтобы загрузить данные.")
