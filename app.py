@@ -13,7 +13,7 @@ FILE_ID = "1cYa6voTVf2OIk6K9rMMv8td8p_NLWXgi"
 DB_URL = f"https://drive.google.com/uc?id={FILE_ID}"
 
 if not os.path.exists(DB_PATH):
-    with st.spinner("⏳ Загрузка базы данных (997 МБ)... Это может занять несколько минут."):
+    with st.spinner("⏳ Загрузка базы данных (1,25 ГБ)... Это может занять несколько минут."):
         try:
             gdown.download(DB_URL, DB_PATH, quiet=False)
             st.success("✅ База данных загружена!")
